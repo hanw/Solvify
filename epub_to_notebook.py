@@ -34,6 +34,55 @@ except ImportError:
     HAS_EBOOKLIB = False
 
 
+def split_into_sentences(text: str) -> list[str]:
+    """
+    Split text into sentences for better readability.
+
+    Args:
+        text: Input text
+
+    Returns:
+        List of sentences
+    """
+    if not text.strip():
+        return []
+
+    # Pattern to split on sentence-ending punctuation followed by space
+    # Handles: . ! ? and also ." !) ?" etc.
+    # Avoids splitting on: Mr. Mrs. Dr. etc., numbers like 1.5, abbreviations
+
+    # Common abbreviations that shouldn't end sentences
+    abbreviations = r'(?<![Mm]r)(?<![Mm]rs)(?<![Dd]r)(?<![Pp]rof)(?<![Ss]t)(?<![Jj]r)(?<![Ss]r)(?<![Ii]nc)(?<![Ll]td)(?<![Ee]tc)(?<![Vv]s)(?<![Ee]\.g)(?<![Ii]\.e)'
+
+    # Split on sentence endings, but keep the punctuation with the sentence
+    # This regex looks for: period/exclamation/question + optional quote/paren + space + capital letter or end
+    sentences = []
+
+    # Simple approach: split on common sentence boundaries
+    # Match: .!? followed by optional closing punctuation, then whitespace
+    pattern = r'([.!?]["\'\)\]]*)\s+'
+
+    parts = re.split(pattern, text)
+
+    current_sentence = ""
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        current_sentence += part
+        # If this part is punctuation (ends a sentence), finalize the sentence
+        if re.match(r'^[.!?]["\'\)\]]*$', part):
+            sentence = current_sentence.strip()
+            if sentence:
+                sentences.append(sentence)
+            current_sentence = ""
+
+    # Don't forget the last part if it doesn't end with sentence punctuation
+    if current_sentence.strip():
+        sentences.append(current_sentence.strip())
+
+    return sentences
+
+
 @dataclass
 class Chapter:
     """Represents a chapter extracted from an EPUB file."""
@@ -157,6 +206,10 @@ def html_to_markdown(html_content: str) -> str:
             text = ''.join(process_element(child) for child in element.children)
             text = ' '.join(text.split())  # Normalize whitespace
             if text:
+                # Split paragraph into sentences for better readability
+                sentences = split_into_sentences(text)
+                if sentences:
+                    return '\n' + '\n'.join(sentences) + '\n'
                 return f"\n{text}\n"
             return ""
 
