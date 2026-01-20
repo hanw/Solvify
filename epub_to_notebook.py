@@ -283,7 +283,20 @@ def html_to_markdown(html_content: str) -> str:
                 processed = process_element(child, depth)
                 if processed:
                     result.append(processed)
-            return ''.join(result)
+            text = ''.join(result)
+
+            # For div/section/article, if it contains substantial text, treat it like a paragraph
+            # and split into sentences (many EPUBs use divs instead of p tags)
+            if tag in ['div', 'section', 'article']:
+                # Check if this div has direct text content (not just nested elements)
+                direct_text = ''.join(str(c) for c in element.children if c.name is None).strip()
+                if direct_text and len(direct_text) > 50:
+                    # This div has substantial direct text, split into sentences
+                    text = ' '.join(text.split())
+                    sentences = split_into_sentences(text)
+                    if sentences:
+                        return '\n' + '\n'.join(sentences) + '\n'
+            return text
 
         elif tag == 'table':
             # Simple table handling
@@ -316,6 +329,24 @@ def html_to_markdown(html_content: str) -> str:
 
     # Clean up multiple newlines
     result = re.sub(r'\n{3,}', '\n\n', result)
+
+    # Post-process: split any remaining long lines into sentences
+    # This handles cases where HTML structure doesn't use proper paragraph tags
+    lines = result.split('\n')
+    processed_lines = []
+    for line in lines:
+        stripped = line.strip()
+        # If line is long and looks like prose (not a heading, list, etc.)
+        if len(stripped) > 200 and not stripped.startswith(('#', '-', '*', '|', '>', '`', '!')):
+            sentences = split_into_sentences(stripped)
+            if len(sentences) > 1:
+                processed_lines.extend(sentences)
+            else:
+                processed_lines.append(line)
+        else:
+            processed_lines.append(line)
+
+    result = '\n'.join(processed_lines)
 
     return result.strip()
 
