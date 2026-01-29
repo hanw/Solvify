@@ -343,133 +343,164 @@ def extract_blocks(html_content: str) -> list[ContentBlock]:
     Returns:
         List of ContentBlock objects
     """
-    blocks: list[ContentBlock] = []
-
     if HAS_BS4:
         soup = BeautifulSoup(html_content, 'html.parser')
         root = soup.find('body') or soup
+        return _extract_blocks_from_element(root)
+    else:
+        return _extract_blocks_regex(html_content)
 
-        for elem in root.children:
-            # Skip whitespace-only text nodes
-            if elem.name is None:
-                text = str(elem).strip()
-                if text:
-                    blocks.append(ContentBlock(
-                        block_type="paragraph",
-                        html=str(elem),
-                        text=text,
-                    ))
-                continue
 
-            tag = elem.name.lower()
+def _extract_blocks_from_element(root) -> list[ContentBlock]:
+    """
+    Recursively extract ContentBlocks from a BeautifulSoup element.
 
-            if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
-                text = elem.get_text(strip=True)
-                if text:
-                    blocks.append(ContentBlock(
-                        block_type="heading",
-                        html=str(elem),
-                        text=text,
-                        heading_level=int(tag[1]),
-                    ))
+    Walks direct children of the given element. Container tags (div, section, etc.)
+    are recursed into by passing the element itself — no re-parsing needed.
 
-            elif tag == 'p':
-                text = elem.get_text(strip=True)
-                if text:
-                    blocks.append(ContentBlock(
-                        block_type="paragraph",
-                        html=str(elem),
-                        text=text,
-                    ))
+    Args:
+        root: A BeautifulSoup Tag or BeautifulSoup object
 
-            elif tag in ('ul', 'ol'):
-                text = elem.get_text(strip=True)
-                if text:
-                    blocks.append(ContentBlock(
-                        block_type="list",
-                        html=str(elem),
-                        text=text,
-                    ))
+    Returns:
+        List of ContentBlock objects
+    """
+    blocks: list[ContentBlock] = []
 
-            elif tag == 'blockquote':
-                text = elem.get_text(strip=True)
-                if text:
-                    blocks.append(ContentBlock(
-                        block_type="blockquote",
-                        html=str(elem),
-                        text=text,
-                    ))
-
-            elif tag == 'table':
-                text = elem.get_text(strip=True)
-                if text:
-                    blocks.append(ContentBlock(
-                        block_type="table",
-                        html=str(elem),
-                        text=text,
-                    ))
-
-            elif tag in ('pre', 'code'):
-                text = elem.get_text()
-                if text.strip():
-                    blocks.append(ContentBlock(
-                        block_type="code",
-                        html=str(elem),
-                        text=text,
-                    ))
-
-            elif tag == 'hr':
+    for elem in root.children:
+        # Skip whitespace-only text nodes
+        if elem.name is None:
+            text = str(elem).strip()
+            if text:
                 blocks.append(ContentBlock(
-                    block_type="hr",
-                    html=str(elem),
-                    text="",
-                ))
-
-            elif tag == 'figure':
-                text = elem.get_text(strip=True)
-                blocks.append(ContentBlock(
-                    block_type="figure",
+                    block_type="paragraph",
                     html=str(elem),
                     text=text,
                 ))
+            continue
 
-            elif tag in ('div', 'section', 'article', 'main', 'span'):
-                # Recurse into container elements by extracting their inner HTML
-                inner_blocks = extract_blocks(str(elem))
-                blocks.extend(inner_blocks)
+        tag = elem.name.lower()
 
-            else:
-                # Fallback: treat as paragraph if it has text
-                text = elem.get_text(strip=True)
-                if text:
-                    blocks.append(ContentBlock(
-                        block_type="paragraph",
-                        html=str(elem),
-                        text=text,
-                    ))
-    else:
-        # Fallback: split on block-level tags using regex
-        # Extract headings
-        for m in re.finditer(r'<(h[1-6])[^>]*>(.*?)</\1>', html_content, re.DOTALL | re.IGNORECASE):
-            tag, inner = m.group(1), m.group(2)
-            text = re.sub(r'<[^>]+>', '', inner).strip()
+        if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+            text = elem.get_text(strip=True)
             if text:
                 blocks.append(ContentBlock(
                     block_type="heading",
-                    html=m.group(0),
+                    html=str(elem),
                     text=text,
                     heading_level=int(tag[1]),
                 ))
 
-        # Extract paragraphs
-        for m in re.finditer(r'<p[^>]*>(.*?)</p>', html_content, re.DOTALL | re.IGNORECASE):
-            text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+        elif tag == 'p':
+            text = elem.get_text(strip=True)
             if text:
                 blocks.append(ContentBlock(
                     block_type="paragraph",
-                    html=m.group(0),
+                    html=str(elem),
                     text=text,
                 ))
+
+        elif tag in ('ul', 'ol'):
+            text = elem.get_text(strip=True)
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="list",
+                    html=str(elem),
+                    text=text,
+                ))
+
+        elif tag == 'blockquote':
+            text = elem.get_text(strip=True)
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="blockquote",
+                    html=str(elem),
+                    text=text,
+                ))
+
+        elif tag == 'table':
+            text = elem.get_text(strip=True)
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="table",
+                    html=str(elem),
+                    text=text,
+                ))
+
+        elif tag in ('pre', 'code'):
+            text = elem.get_text()
+            if text.strip():
+                blocks.append(ContentBlock(
+                    block_type="code",
+                    html=str(elem),
+                    text=text,
+                ))
+
+        elif tag == 'hr':
+            blocks.append(ContentBlock(
+                block_type="hr",
+                html=str(elem),
+                text="",
+            ))
+
+        elif tag == 'figure':
+            text = elem.get_text(strip=True)
+            blocks.append(ContentBlock(
+                block_type="figure",
+                html=str(elem),
+                text=text,
+            ))
+
+        elif tag in ('div', 'section', 'article', 'main', 'span'):
+            # Recurse into container elements directly (no re-parsing)
+            inner_blocks = _extract_blocks_from_element(elem)
+            blocks.extend(inner_blocks)
+
+        else:
+            # Fallback: treat as paragraph if it has text
+            text = elem.get_text(strip=True)
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="paragraph",
+                    html=str(elem),
+                    text=text,
+                ))
+
+    return blocks
+
+
+def _extract_blocks_regex(html_content: str) -> list[ContentBlock]:
+    """
+    Fallback block extraction using regex when BeautifulSoup is unavailable.
+
+    Args:
+        html_content: Raw HTML content
+
+    Returns:
+        List of ContentBlock objects (headings and paragraphs only)
+    """
+    blocks: list[ContentBlock] = []
+
+    # Extract headings
+    for m in re.finditer(r'<(h[1-6])[^>]*>(.*?)</\1>', html_content, re.DOTALL | re.IGNORECASE):
+        tag, inner = m.group(1), m.group(2)
+        text = re.sub(r'<[^>]+>', '', inner).strip()
+        if text:
+            blocks.append(ContentBlock(
+                block_type="heading",
+                html=m.group(0),
+                text=text,
+                heading_level=int(tag[1]),
+            ))
+
+    # Extract paragraphs
+    for m in re.finditer(r'<p[^>]*>(.*?)</p>', html_content, re.DOTALL | re.IGNORECASE):
+        text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+        if text:
+            blocks.append(ContentBlock(
+                block_type="paragraph",
+                html=m.group(0),
+                text=text,
+            ))
 
     return blocks
 
