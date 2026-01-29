@@ -84,12 +84,22 @@ def split_into_sentences(text: str) -> list[str]:
 
 
 @dataclass
+class ContentBlock:
+    """Represents a single structural block extracted from HTML."""
+    block_type: str  # "heading", "paragraph", "list", "blockquote", "table", "code", "hr", "figure"
+    html: str
+    text: str
+    heading_level: int = 0  # 1-6 for headings, 0 otherwise
+
+
+@dataclass
 class Chapter:
     """Represents a chapter extracted from an EPUB file."""
     index: int
     title: str
     content_html: str
     content_text: str
+    blocks: list[ContentBlock] = field(default_factory=list)
     href: str = ""
 
 
@@ -320,6 +330,369 @@ def html_to_markdown(html_content: str) -> str:
     return result.strip()
 
 
+def extract_blocks(html_content: str) -> list[ContentBlock]:
+    """
+    Parse HTML into a flat list of typed ContentBlocks.
+
+    Walks the top-level children of <body> (or the root) and emits one
+    ContentBlock per structural element (heading, paragraph, list, etc.).
+
+    Args:
+        html_content: Cleaned HTML content
+
+    Returns:
+        List of ContentBlock objects
+    """
+    if HAS_BS4:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        root = soup.find('body') or soup
+        return _extract_blocks_from_element(root)
+    else:
+        return _extract_blocks_regex(html_content)
+
+
+def _extract_blocks_from_element(root) -> list[ContentBlock]:
+    """
+    Recursively extract ContentBlocks from a BeautifulSoup element.
+
+    Walks direct children of the given element. Container tags (div, section, etc.)
+    are recursed into by passing the element itself — no re-parsing needed.
+
+    Args:
+        root: A BeautifulSoup Tag or BeautifulSoup object
+
+    Returns:
+        List of ContentBlock objects
+    """
+    blocks: list[ContentBlock] = []
+
+    for elem in root.children:
+        # Skip whitespace-only text nodes
+        if elem.name is None:
+            text = str(elem).strip()
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="paragraph",
+                    html=str(elem),
+                    text=text,
+                ))
+            continue
+
+        tag = elem.name.lower()
+
+        if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+            text = elem.get_text(strip=True)
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="heading",
+                    html=str(elem),
+                    text=text,
+                    heading_level=int(tag[1]),
+                ))
+
+        elif tag == 'p':
+            text = elem.get_text(strip=True)
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="paragraph",
+                    html=str(elem),
+                    text=text,
+                ))
+
+        elif tag in ('ul', 'ol'):
+            text = elem.get_text(strip=True)
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="list",
+                    html=str(elem),
+                    text=text,
+                ))
+
+        elif tag == 'blockquote':
+            text = elem.get_text(strip=True)
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="blockquote",
+                    html=str(elem),
+                    text=text,
+                ))
+
+        elif tag == 'table':
+            text = elem.get_text(strip=True)
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="table",
+                    html=str(elem),
+                    text=text,
+                ))
+
+        elif tag in ('pre', 'code'):
+            text = elem.get_text()
+            if text.strip():
+                blocks.append(ContentBlock(
+                    block_type="code",
+                    html=str(elem),
+                    text=text,
+                ))
+
+        elif tag == 'hr':
+            blocks.append(ContentBlock(
+                block_type="hr",
+                html=str(elem),
+                text="",
+            ))
+
+        elif tag == 'figure':
+            text = elem.get_text(strip=True)
+            blocks.append(ContentBlock(
+                block_type="figure",
+                html=str(elem),
+                text=text,
+            ))
+
+        elif tag in ('div', 'section', 'article', 'main', 'span'):
+            # Recurse into container elements directly (no re-parsing)
+            inner_blocks = _extract_blocks_from_element(elem)
+            blocks.extend(inner_blocks)
+
+        else:
+            # Fallback: treat as paragraph if it has text
+            text = elem.get_text(strip=True)
+            if text:
+                blocks.append(ContentBlock(
+                    block_type="paragraph",
+                    html=str(elem),
+                    text=text,
+                ))
+
+    return blocks
+
+
+def _extract_blocks_regex(html_content: str) -> list[ContentBlock]:
+    """
+    Fallback block extraction using regex when BeautifulSoup is unavailable.
+
+    Args:
+        html_content: Raw HTML content
+
+    Returns:
+        List of ContentBlock objects (headings and paragraphs only)
+    """
+    blocks: list[ContentBlock] = []
+
+    # Extract headings
+    for m in re.finditer(r'<(h[1-6])[^>]*>(.*?)</\1>', html_content, re.DOTALL | re.IGNORECASE):
+        tag, inner = m.group(1), m.group(2)
+        text = re.sub(r'<[^>]+>', '', inner).strip()
+        if text:
+            blocks.append(ContentBlock(
+                block_type="heading",
+                html=m.group(0),
+                text=text,
+                heading_level=int(tag[1]),
+            ))
+
+    # Extract paragraphs
+    for m in re.finditer(r'<p[^>]*>(.*?)</p>', html_content, re.DOTALL | re.IGNORECASE):
+        text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+        if text:
+            blocks.append(ContentBlock(
+                block_type="paragraph",
+                html=m.group(0),
+                text=text,
+            ))
+
+    return blocks
+
+
+def compute_cell_boundaries(blocks: list[ContentBlock],
+                            target_cell_words: int = 800,
+                            max_cell_words: int = 1500) -> list[int]:
+    """
+    Compute a bitmask indicating where to split blocks into notebook cells.
+
+    Given N blocks, returns an N-length list of 0s and 1s.
+    boundary[i] == 1 means "start a new cell at block i".
+    boundary[0] is always 1.
+
+    Scoring approach (per position i, for i >= 1):
+      1. Structural signals — headings and <hr> always start a new cell.
+      2. Adhesive rules — some pairs must NOT be split (heading+content,
+         paragraph+list, paragraph+blockquote).
+      3. Lexical shift — Jaccard distance between adjacent block word sets.
+         Low overlap suggests a topic change.
+      4. Size pressure — accumulated word count since last boundary pushes
+         toward splitting at paragraph boundaries.
+
+    The score is thresholded at 0.5 to produce the binary mask.
+
+    Args:
+        blocks: List of ContentBlock objects
+        target_cell_words: Ideal word count per cell before applying pressure
+        max_cell_words: Hard maximum; always split when exceeded
+
+    Returns:
+        List of ints (0 or 1), same length as blocks
+    """
+    n = len(blocks)
+    if n == 0:
+        return []
+    if n == 1:
+        return [1]
+
+    boundary = [0] * n
+    boundary[0] = 1
+
+    words_since_boundary = len(blocks[0].text.split())
+
+    for i in range(1, n):
+        curr = blocks[i]
+        prev = blocks[i - 1]
+        score = 0.0
+
+        # --- Structural signals (definitive) ---
+        if curr.block_type == "heading":
+            boundary[i] = 1
+            words_since_boundary = len(curr.text.split())
+            continue
+
+        if prev.block_type == "hr":
+            boundary[i] = 1
+            words_since_boundary = len(curr.text.split())
+            continue
+
+        # --- Adhesive rules (force no-split) ---
+        # Keep heading with its following content
+        if prev.block_type == "heading":
+            words_since_boundary += len(curr.text.split())
+            continue  # boundary[i] stays 0
+
+        # Keep paragraph + immediately following list/blockquote together
+        if prev.block_type == "paragraph" and curr.block_type in ("list", "blockquote"):
+            words_since_boundary += len(curr.text.split())
+            continue
+
+        # --- Lexical shift (Jaccard) ---
+        words_prev = set(prev.text.lower().split())
+        words_curr = set(curr.text.lower().split())
+        if words_prev and words_curr:
+            jaccard = len(words_prev & words_curr) / len(words_prev | words_curr)
+            if jaccard < 0.1:
+                score += 0.6
+            elif jaccard < 0.2:
+                score += 0.3
+
+        # --- Size pressure ---
+        curr_words = len(curr.text.split())
+        if words_since_boundary >= max_cell_words:
+            # Hard limit: must split
+            score = 1.0
+        elif words_since_boundary >= target_cell_words:
+            # Soft pressure: linearly increase score from 0 to 0.5
+            pressure = (words_since_boundary - target_cell_words) / (max_cell_words - target_cell_words)
+            score += min(pressure * 0.5, 0.5)
+
+        # --- Threshold ---
+        if score >= 0.5:
+            boundary[i] = 1
+            words_since_boundary = curr_words
+        else:
+            words_since_boundary += curr_words
+
+    return boundary
+
+
+def group_blocks_by_boundary(blocks: list[ContentBlock],
+                             boundary: list[int]) -> list[list[ContentBlock]]:
+    """
+    Group blocks into cell groups based on the boundary bitmask.
+
+    Args:
+        blocks: List of ContentBlock objects
+        boundary: Bitmask from compute_cell_boundaries()
+
+    Returns:
+        List of groups, where each group is a list of ContentBlocks
+        that belong in the same notebook cell.
+    """
+    if not blocks:
+        return []
+
+    groups: list[list[ContentBlock]] = []
+    current_group: list[ContentBlock] = []
+
+    for i, block in enumerate(blocks):
+        if boundary[i] == 1 and current_group:
+            groups.append(current_group)
+            current_group = []
+        current_group.append(block)
+
+    if current_group:
+        groups.append(current_group)
+
+    return groups
+
+
+def block_to_markdown(block: ContentBlock) -> str:
+    """
+    Convert a single ContentBlock to Markdown.
+
+    Args:
+        block: ContentBlock to convert
+
+    Returns:
+        Markdown string for this block
+    """
+    if block.block_type == "heading":
+        return f"{'#' * block.heading_level} {block.text}"
+
+    if block.block_type == "hr":
+        return "---"
+
+    if block.block_type == "code":
+        return f"```\n{block.text}\n```"
+
+    # Wrap fragment in a <body> so html_to_markdown processes it correctly
+    wrapped = f"<body>{block.html}</body>"
+    md = html_to_markdown(wrapped)
+    return md.strip()
+
+
+def blocks_to_cell_source(blocks: list[ContentBlock],
+                          output_format: str = "markdown") -> list[str]:
+    """
+    Convert a group of ContentBlocks into notebook cell source lines.
+
+    Args:
+        blocks: List of blocks belonging to one cell
+        output_format: "markdown" or "text"
+
+    Returns:
+        List of source lines for a notebook cell
+    """
+    if output_format == "text":
+        parts = [b.text for b in blocks if b.text]
+        content = "\n\n".join(parts)
+    else:
+        parts = [block_to_markdown(b) for b in blocks]
+        content = "\n\n".join(parts)
+
+    # Clean up excessive newlines
+    content = re.sub(r'\n{3,}', '\n\n', content)
+
+    lines = []
+    for line in content.split('\n'):
+        lines.append(line + '\n')
+
+    # Trim trailing empty newline
+    if lines and lines[-1] == '\n':
+        lines = lines[:-1]
+    elif lines:
+        lines[-1] = lines[-1].rstrip('\n')
+
+    return lines
+
+
 def parse_epub_with_ebooklib(epub_path: str) -> Book:
     """
     Parse an EPUB file using ebooklib.
@@ -370,11 +743,15 @@ def parse_epub_with_ebooklib(epub_path: str) -> Book:
             # Try to extract chapter title from content
             chapter_title = extract_chapter_title(cleaned_html, chapter_index)
 
+            # Extract structural blocks
+            blocks = extract_blocks(cleaned_html)
+
             chapter = Chapter(
                 index=chapter_index,
                 title=chapter_title,
                 content_html=cleaned_html,
                 content_text=plain_text,
+                blocks=blocks,
                 href=item.get_name()
             )
 
@@ -509,11 +886,14 @@ def parse_epub_manual(epub_path: str) -> Book:
 
                             chapter_title = extract_chapter_title(cleaned_html, chapter_index)
 
+                            blocks = extract_blocks(cleaned_html)
+
                             chapter = Chapter(
                                 index=chapter_index,
                                 title=chapter_title,
                                 content_html=cleaned_html,
                                 content_text=plain_text,
+                                blocks=blocks,
                                 href=content_path
                             )
 
@@ -553,11 +933,14 @@ def parse_epub_manual(epub_path: str) -> Book:
 
                             chapter_title = extract_chapter_title(cleaned_html, chapter_index)
 
+                            blocks = extract_blocks(cleaned_html)
+
                             chapter = Chapter(
                                 index=chapter_index,
                                 title=chapter_title,
                                 content_html=cleaned_html,
                                 content_text=plain_text,
+                                blocks=blocks,
                                 href=content_path
                             )
 
@@ -627,6 +1010,10 @@ def create_notebook(chapter: Chapter, book_title: str, book_author: str,
     """
     Create a Jupyter notebook for a chapter.
 
+    If the chapter has structural blocks, uses boundary detection to split
+    content into multiple semantically-grouped cells. Otherwise falls back
+    to a single content cell.
+
     Args:
         chapter: Chapter object
         book_title: Title of the book
@@ -652,28 +1039,40 @@ def create_notebook(chapter: Chapter, book_title: str, book_author: str,
         "source": title_source
     })
 
-    # Content cell
-    if output_format == "markdown":
-        content = html_to_markdown(chapter.content_html)
+    if chapter.blocks:
+        # --- Multi-cell path: use boundary detection ---
+        boundary = compute_cell_boundaries(chapter.blocks)
+        groups = group_blocks_by_boundary(chapter.blocks, boundary)
+
+        for group in groups:
+            source_lines = blocks_to_cell_source(group, output_format)
+            if source_lines:
+                cells.append({
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": source_lines
+                })
     else:
-        content = chapter.content_text
+        # --- Fallback: single content cell (no blocks extracted) ---
+        if output_format == "markdown":
+            content = html_to_markdown(chapter.content_html)
+        else:
+            content = chapter.content_text
 
-    # Split content into lines for notebook format
-    content_lines = []
-    for line in content.split('\n'):
-        content_lines.append(line + '\n')
+        content_lines = []
+        for line in content.split('\n'):
+            content_lines.append(line + '\n')
 
-    # Remove trailing newline from last line if it exists
-    if content_lines and content_lines[-1] == '\n':
-        content_lines = content_lines[:-1]
-    elif content_lines:
-        content_lines[-1] = content_lines[-1].rstrip('\n')
+        if content_lines and content_lines[-1] == '\n':
+            content_lines = content_lines[:-1]
+        elif content_lines:
+            content_lines[-1] = content_lines[-1].rstrip('\n')
 
-    cells.append({
-        "cell_type": "markdown",
-        "metadata": {},
-        "source": content_lines
-    })
+        cells.append({
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": content_lines
+        })
 
     # Create the notebook structure
     notebook = {
