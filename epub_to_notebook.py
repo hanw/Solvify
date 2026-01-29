@@ -573,9 +573,15 @@ def compute_cell_boundaries(blocks: list[ContentBlock],
             continue
 
         # --- Lexical shift (Jaccard) ---
+        # Only apply lexical scoring when both blocks have enough words
+        # to produce a meaningful signal. Short dialogue lines and
+        # one-liners produce noisy Jaccard values.
+        MIN_WORDS_FOR_JACCARD = 15
         words_prev = set(prev.text.lower().split())
         words_curr = set(curr.text.lower().split())
-        if words_prev and words_curr:
+        if (len(words_prev) >= MIN_WORDS_FOR_JACCARD and
+                len(words_curr) >= MIN_WORDS_FOR_JACCARD and
+                words_prev and words_curr):
             jaccard = len(words_prev & words_curr) / len(words_prev | words_curr)
             if jaccard < 0.1:
                 score += 0.6
