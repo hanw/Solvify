@@ -358,23 +358,28 @@ def _extract_blocks_from_element(root) -> list[ContentBlock]:
     Walks direct children of the given element. Container tags (div, section, etc.)
     are recursed into by passing the element itself — no re-parsing needed.
 
+    After extraction, consecutive bare text nodes (not wrapped in any HTML tag)
+    are merged into a single block. This handles cases like concrete poetry or
+    indented verse where each line is a raw text node separated by <br/> tags.
+
     Args:
         root: A BeautifulSoup Tag or BeautifulSoup object
 
     Returns:
         List of ContentBlock objects
     """
-    blocks: list[ContentBlock] = []
+    raw_blocks: list[ContentBlock] = []
 
     for elem in root.children:
         # Skip whitespace-only text nodes
         if elem.name is None:
             text = str(elem).strip()
             if text:
-                blocks.append(ContentBlock(
+                raw_blocks.append(ContentBlock(
                     block_type="paragraph",
                     html=str(elem),
                     text=text,
+                    heading_level=-1,  # sentinel: bare text node
                 ))
             continue
 
@@ -383,7 +388,7 @@ def _extract_blocks_from_element(root) -> list[ContentBlock]:
         if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
             text = elem.get_text(strip=True)
             if text:
-                blocks.append(ContentBlock(
+                raw_blocks.append(ContentBlock(
                     block_type="heading",
                     html=str(elem),
                     text=text,
@@ -393,7 +398,7 @@ def _extract_blocks_from_element(root) -> list[ContentBlock]:
         elif tag == 'p':
             text = elem.get_text(strip=True)
             if text:
-                blocks.append(ContentBlock(
+                raw_blocks.append(ContentBlock(
                     block_type="paragraph",
                     html=str(elem),
                     text=text,
@@ -402,7 +407,7 @@ def _extract_blocks_from_element(root) -> list[ContentBlock]:
         elif tag in ('ul', 'ol'):
             text = elem.get_text(strip=True)
             if text:
-                blocks.append(ContentBlock(
+                raw_blocks.append(ContentBlock(
                     block_type="list",
                     html=str(elem),
                     text=text,
@@ -411,7 +416,7 @@ def _extract_blocks_from_element(root) -> list[ContentBlock]:
         elif tag == 'blockquote':
             text = elem.get_text(strip=True)
             if text:
-                blocks.append(ContentBlock(
+                raw_blocks.append(ContentBlock(
                     block_type="blockquote",
                     html=str(elem),
                     text=text,
@@ -420,7 +425,7 @@ def _extract_blocks_from_element(root) -> list[ContentBlock]:
         elif tag == 'table':
             text = elem.get_text(strip=True)
             if text:
-                blocks.append(ContentBlock(
+                raw_blocks.append(ContentBlock(
                     block_type="table",
                     html=str(elem),
                     text=text,
@@ -429,14 +434,14 @@ def _extract_blocks_from_element(root) -> list[ContentBlock]:
         elif tag in ('pre', 'code'):
             text = elem.get_text()
             if text.strip():
-                blocks.append(ContentBlock(
+                raw_blocks.append(ContentBlock(
                     block_type="code",
                     html=str(elem),
                     text=text,
                 ))
 
         elif tag == 'hr':
-            blocks.append(ContentBlock(
+            raw_blocks.append(ContentBlock(
                 block_type="hr",
                 html=str(elem),
                 text="",
@@ -444,26 +449,69 @@ def _extract_blocks_from_element(root) -> list[ContentBlock]:
 
         elif tag == 'figure':
             text = elem.get_text(strip=True)
-            blocks.append(ContentBlock(
+            raw_blocks.append(ContentBlock(
                 block_type="figure",
                 html=str(elem),
                 text=text,
             ))
 
+        elif tag == 'br':
+            # <br/> between text nodes — skip, the merge step handles spacing
+            continue
+
         elif tag in ('div', 'section', 'article', 'main', 'span'):
             # Recurse into container elements directly (no re-parsing)
             inner_blocks = _extract_blocks_from_element(elem)
-            blocks.extend(inner_blocks)
+            raw_blocks.extend(inner_blocks)
 
         else:
             # Fallback: treat as paragraph if it has text
             text = elem.get_text(strip=True)
             if text:
-                blocks.append(ContentBlock(
+                raw_blocks.append(ContentBlock(
                     block_type="paragraph",
                     html=str(elem),
                     text=text,
                 ))
+
+    # --- Merge consecutive inline/bare text nodes ---
+    # Bare text nodes use heading_level=-1 as a sentinel.
+    # Inline elements (<i>, <b>, <em>, <strong>, <a>) that appear between
+    # bare text nodes are also part of the same text flow (e.g. concrete
+    # poetry with italicized words). We mark these as -2 and merge them
+    # together with -1 nodes into single blocks.
+    INLINE_TAGS = {'i', 'b', 'em', 'strong', 'a', 'sup', 'sub', 'small', 'big'}
+
+    # Re-tag inline-element blocks that sit between bare text nodes
+    for i, block in enumerate(raw_blocks):
+        if block.heading_level == 0 and block.block_type == "paragraph":
+            # Check if this block's HTML is an inline tag (not wrapped in <p>)
+            html_stripped = block.html.strip()
+            if html_stripped.startswith('<'):
+                tag_match = re.match(r'^<(\w+)', html_stripped)
+                if tag_match and tag_match.group(1).lower() in INLINE_TAGS:
+                    block.heading_level = -2  # sentinel: inline element
+
+    blocks: list[ContentBlock] = []
+    for block in raw_blocks:
+        is_mergeable = block.heading_level in (-1, -2)
+        prev_is_mergeable = blocks and blocks[-1].heading_level in (-1, -2)
+        if is_mergeable and prev_is_mergeable:
+            # Merge into previous block
+            prev = blocks[-1]
+            blocks[-1] = ContentBlock(
+                block_type="paragraph",
+                html=prev.html + " " + block.html,
+                text=prev.text + " " + block.text,
+                heading_level=-1,
+            )
+        else:
+            blocks.append(block)
+
+    # Reset sentinel heading_level to 0
+    for block in blocks:
+        if block.heading_level < 0:
+            block.heading_level = 0
 
     return blocks
 
