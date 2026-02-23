@@ -38,6 +38,10 @@ tests/output/
 tests/*.epub
 *_notebooks/
 
+# Data files
+*.epub
+*.html
+
 # OS
 .DS_Store
 Thumbs.db
